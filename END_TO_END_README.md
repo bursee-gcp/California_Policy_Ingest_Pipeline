@@ -1,99 +1,76 @@
-# PolicyAgent Ingestion Pipeline Template
+# California Policy Ingest Pipeline
 
 This repository contains a standalone template for the end-to-end data ingestion pipeline that fetches, parses, and loads the California Legislative data into BigQuery.
 
 ## Overview
 
-The pipeline runs as a **Google Cloud Run Job**. It downloads the daily legislative data dump (a ZIP file containing `.dat` files and an SQL schema script), converts the data into Parquet format, handles Large Object (LOB) inlining for bill text XML, stages the data in Google Cloud Storage (GCS), and loads it into BigQuery.
+The pipeline runs as a **Google Cloud Run Job**. It downloads the daily legislative data dump (a ZIP file containing `.dat` files and an SQL schema script), converts the data into Parquet format, handles Large Object (LOB) inlining on-the-fly, stages the data in Google Cloud Storage (GCS), and loads it into BigQuery with explicit schema enforcement to maintain typing.
 
-### Assets Included:
-- `ingest.py`: The core ingestion Python script.
-- `capublic.sql`: The schema mapping tool to correctly type BigQuery columns based on the original MySQL dump.
-- `Dockerfile`: Container definition for Cloud Run.
-- `requirements.txt`: Python package dependencies.
-- `env.yaml`: Environment variable configuration for deployment.
+### Key Optimizations:
+*   **Streaming Extraction**: Processes files one at a time using local `/tmp` storage, immediately deleting processed files to stay below resource limits with zero Out-of-Memory (OOM) risks.
+*   **Explicit Schema Mapping**: Extracts definitions from `capublic.sql` to map robust types (e.g., `VARCHAR` $\rightarrow$ `STRING`, `LONGBLOB` $\rightarrow$ `BYTES`) rather than depending on BigQuery auto-detection.
+*   **Zero-FUSE Penalty**: Processes on ephemeral storage to avoid GCS FUSE latency overheads.
 
 ---
 
 ## Prerequisites
 
-Before deploying the pipeline, ensure the following Google Cloud resources exist:
-
+Before deploying the pipeline, ensure you have:
 1.  **GCP Project**: An active Google Cloud Project with billing enabled.
-2.  **Enabled APIs**:
-    ```bash
-    gcloud services enable run.googleapis.com storage.googleapis.com bigquery.googleapis.com artifactregistry.googleapis.com
-    ```
-3.  **BigQuery Dataset**: Create a dataset (e.g., `cal_legislature_data`).
-    ```bash
-    bq mk --dataset your-gcp-project-id:cal_legislature_data
-    ```
-4.  **Cloud Storage Bucket**: Create a staging bucket.
-    ```bash
-    gcloud storage buckets create gs://your-gcs-staging-bucket-name
-    ```
-5.  **Artifact Registry repository**: Create a Docker repository for the container image.
-    ```bash
-    gcloud artifacts repositories create policy-agent-repo --repository-format=docker --location=us-central1
-    ```
-6.  **Service Account**: Create a service account with `roles/bigquery.dataEditor` and `roles/storage.objectAdmin` to run the job.
+2.  **Terraform**: Installed on your local machine.
+3.  **Authenticated gcloud CLI**: Standard Google Cloud SDK initialized to manage building triggers.
 
 ---
 
 ## Deployment Steps
 
-### 1. Configure Environment Variables
-Edit the `env.yaml` file to include your specific project details:
-```yaml
-GCP_PROJECT: "your-gcp-project-id"
-GCS_BUCKET: "your-gcs-staging-bucket-name"
-```
-
-### 2. Build and Push the Docker Image
+### 1. Configure Variables
+Create a `terraform.tfvars` file from the example format:
 ```bash
-# Update the region and project ID below
-IMAGE_URI="us-central1-docker.pkg.dev/your-gcp-project-id/policy-agent-repo/ingest:latest"
-
-gcloud builds submit --tag $IMAGE_URI .
+cp terraform.tfvars.example terraform.tfvars
 ```
+Edit the `terraform.tfvars` to fill in your `project_id`.
 
-### 3. Deploy the Cloud Run Job
-Deploy the job using the built image and the `env.yaml` file:
+### 2. Deploy Infrastructure
+Initialize and apply the Terraform configuration. This will enable APIs, create the staging bucket, dataset, and Artifact Registry repository before triggering building the image:
 
 ```bash
-gcloud run jobs create policy-agent-ingest \
-    --image $IMAGE_URI \
-    --env-vars-file env.yaml \
-    --region us-central1 \
-    --task-timeout 60m \
-    --memory 4Gi \
-    --cpu 2 \
-    --service-account your-service-account@your-gcp-project-id.iam.gserviceaccount.com
+terraform init
+terraform apply
 ```
-*Note: The 60-minute timeout and 4Gi memory are required due to the size of the initial ZIP file download (~680MB) and the intensive padding/LOB inlining process.*
 
-### 4. Execute the Pipeline
-You can trigger the job manually from the GCP Console or via the CLI:
+The Docker image build that runs via a Cloud Build task will trigger automatically if the code hashes change, solving correct build reliance before creating the Cloud Run job.
+
+---
+
+## Pipeline Operations
+
+### Execute the Pipeline
+Trigger the job manually from the GCP Console or via the CLI:
 ```bash
 gcloud run jobs execute policy-agent-ingest --region us-central1
 ```
 
-## Advanced Operation
+### Advanced Usage
 
-### Direct URL vs ZIP Upload
-By default, the script downloads directly from `http://downloads.leginfo.legislature.ca.gov/pubinfo_2025.zip`.
-
-If you experience slow download speeds from the state server, you can manually upload the ZIP to your GCS bucket and override the argument when executing the job:
-```bash
-gcloud run jobs execute policy-agent-ingest \
-    --region us-central1 \
-    --args="--zip-file=gs://your-gcs-staging-bucket-name/pubinfo_2025.zip"
-```
-
-### Debugging with a Limit
-When testing, you can pass a `--limit` argument to restrict the number of rows processed per table:
+#### Debugging with Limits
+To test with small chunks (highly recommended for validation cycles), pass a limit parameter strictly enforcing row-limits:
 ```bash
 gcloud run jobs execute policy-agent-ingest \
     --region us-central1 \
     --args="--limit=200"
+```
+
+#### Custom Zip Source
+By default, the script calculates and downloads the correct static yearly dump (e.g., `pubinfo_2026.zip`). You can override this to run historical data or point to a manual extraction link:
+```bash
+gcloud run jobs execute policy-agent-ingest \
+    --region us-central1 \
+    --args="--zip-url=http://custom-url/pubinfo_2025.zip"
+```
+Or use a GCS staging address:
+```bash
+gcloud run jobs execute policy-agent-ingest \
+    --region us-central1 \
+    --args="--zip-file=gs://your-bucket-name/backup.zip"
 ```

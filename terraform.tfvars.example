@@ -1,0 +1,9 @@
+# Required Variables
+project_id = "your-gcp-project-id"
+
+# Optional Overrides
+region          = "us-central1"
+bucket_name     = "staging"
+dataset_id       = "cal_legislature_data"
+repository_name = "policy-agent-repo"
+job_name         = "policy-agent-ingest"
