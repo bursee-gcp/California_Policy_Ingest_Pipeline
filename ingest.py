@@ -101,6 +101,30 @@ def load_to_bigquery(client, dataset_id, table_name, uri, schema):
     except Exception as e:
         logger.error(f"Failed to load {table_name} to BigQuery: {e}")
 
+def cast_dataframe_to_schema(df, schema):
+    """Casts DataFrame columns to match explicit BigQuery schema field types."""
+    for field in schema:
+        col = field.name
+        if col in df.columns:
+            try:
+                if field.field_type == 'DATETIME':
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                elif field.field_type == 'DATE':
+                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                elif field.field_type == 'INTEGER':
+                    df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+                elif field.field_type == 'NUMERIC':
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                elif field.field_type == 'STRING':
+                    # User-suggested safe string conversion preserving true nulls, with string stripping
+                    df[col] = df[col].where(df[col].notnull(), None).astype(str).str.strip('`"\'').replace(['nan', 'None', 'NaN', '<NA>', ''], [None]*5)
+                elif field.field_type == 'BYTES':
+                    # Safe encoding checking for strings
+                    df[col] = df[col].apply(lambda x: x.encode('utf-8') if isinstance(x, str) else None)
+            except Exception as e:
+                logger.warning(f"Failed to cast column {col} to {field.field_type}: {e}")
+    return df
+
 def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id, zip_ref, limit=None):
     """
     Parses a .dat file, converts to Parquet, uploads to GCS, and loads to BigQuery.
@@ -139,14 +163,8 @@ def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id
 
                     chunk['bill_xml'] = chunk['bill_xml'].apply(read_lob)
                 
-                # Cleanup and Type Management
-                for col in chunk.select_dtypes(include=['object']).columns:
-                     chunk[col] = chunk[col].astype(str).str.strip('`"\'')
-                
-                # Explicit conversion for BYTES to prevent type mismatch in Parquet
-                for field in schema:
-                    if field.name in chunk.columns and field.field_type == 'BYTES':
-                        chunk[field.name] = chunk[field.name].apply(lambda x: x.encode('utf-8') if isinstance(x, str) else x)
+                # Enforce Strict Schema Casting Pre-Parquet
+                chunk = cast_dataframe_to_schema(chunk, schema)
 
                 output_file = f"/tmp/{table_name}_part_{part_num}.parquet"
                 chunk.to_parquet(output_file, index=False)
