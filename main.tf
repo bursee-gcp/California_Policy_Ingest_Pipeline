@@ -89,6 +89,12 @@ resource "google_project_iam_member" "bq_editor" {
   member  = "serviceAccount:${google_service_account.job_sa.email}"
 }
 
+resource "google_project_iam_member" "bq_user" {
+  project = var.project_id
+  role    = "roles/bigquery.user"
+  member  = "serviceAccount:${google_service_account.job_sa.email}"
+}
+
 resource "google_project_iam_member" "storage_admin" {
   project = var.project_id
   role    = "roles/storage.objectAdmin"
