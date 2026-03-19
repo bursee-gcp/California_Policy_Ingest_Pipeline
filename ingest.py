@@ -215,16 +215,48 @@ def main():
         else:
             zip_path = args.zip_file
     elif args.zip_url:
-        logger.info(f"Downloading zip from: {args.zip_url}")
-        try:
-            with requests.get(args.zip_url, stream=True, timeout=(10, 300)) as r:
-                r.raise_for_status()
-                with open(zip_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-        except Exception as e:
-            logger.error(f"Failed to download zip: {e}")
-            return
+        url_to_try = args.zip_url
+        is_default = (args.zip_url == default_url)
+        try_count = 0
+        max_tries = 2 if is_default else 1
+        
+        while try_count < max_tries:
+            logger.info(f"Attempting to download from: {url_to_try}")
+            try:
+                # Use stream=True to check headers before committing to body stream
+                with requests.get(url_to_try, stream=True, timeout=(10, 300)) as r:
+                    if r.status_code == 200:
+                        logger.info(f"Downloading ZIP content from {url_to_try}...")
+                        with open(zip_path, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                        break # Success
+                    elif r.status_code == 404:
+                        logger.warning(f"Received 404 Not Found for {url_to_try}")
+                        if is_default and try_count == 0:
+                            fallback_year = current_year - 1
+                            logger.info(f"Falling back to previous year dataset: {fallback_year}")
+                            url_to_try = f"http://downloads.leginfo.legislature.ca.gov/pubinfo_{fallback_year}.zip"
+                            try_count += 1
+                            continue
+                        else:
+                            logger.error(f"Download failed: {url_to_try} is not available.")
+                            return
+                    else:
+                        r.raise_for_status()
+            except Exception as e:
+                logger.error(f"Failed to download zip: {e}")
+                if is_default and try_count == 0:
+                     fallback_year = current_year - 1
+                     logger.info(f"Retrying with previous year due to exception: {fallback_year}")
+                     url_to_try = f"http://downloads.leginfo.legislature.ca.gov/pubinfo_{fallback_year}.zip"
+                     try_count += 1
+                     continue
+                return
+        
+        if not os.path.exists(zip_path):
+             logger.error("Download failed to create zip file on disk.")
+             return
 
     # 2. Iterative Processing
     if os.path.exists(zip_path):
