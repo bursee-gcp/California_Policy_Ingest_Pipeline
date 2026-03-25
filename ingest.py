@@ -23,10 +23,10 @@ def map_mysql_to_bq(mysql_type):
     
     if mysql_type in ['VARCHAR', 'CHAR', 'LONGTEXT', 'TEXT', 'ENUM']:
         return 'STRING'
-    elif mysql_type in ['INT', 'INTEGER', 'SMALLINT', 'TINYINT', 'MEDIUMINT', 'BIGINT']:
+    elif mysql_type in ['INT', 'INTEGER', 'SMALLINT', 'TINYINT', 'MEDIUMINT', 'BIGINT', 'DECIMAL']:
         return 'INTEGER'
-    elif mysql_type in ['DECIMAL', 'NUMERIC', 'FLOAT', 'DOUBLE']:
-        return 'NUMERIC'
+    elif mysql_type in ['NUMERIC', 'FLOAT', 'DOUBLE']:
+        return 'FLOAT64'
     elif mysql_type == 'DATETIME':
         return 'DATETIME'
     elif mysql_type == 'DATE':
@@ -113,7 +113,7 @@ def cast_dataframe_to_schema(df, schema):
                     df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
                 elif field.field_type == 'INTEGER':
                     df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
-                elif field.field_type == 'NUMERIC':
+                elif field.field_type == 'FLOAT64':
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 elif field.field_type == 'STRING':
                     # User-suggested safe string conversion preserving true nulls, with string stripping
