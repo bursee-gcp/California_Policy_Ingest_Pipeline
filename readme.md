@@ -4,16 +4,13 @@ This repository contains a standalone template for the end-to-end data ingestion
 
 ## Overview
 
-The pipeline runs as a **Google Cloud Run Job**. It downloads the daily legislative data dump (a ZIP file containing `.dat` files and an SQL schema script), converts the data into Parquet format, handles Large Object (LOB) inlining on-the-fly, stages the data in Google Cloud Storage (GCS), and loads it into BigQuery with explicit schema enforcement to maintain typing.
+The pipeline runs as a single **Google Cloud Run Job** designed to handle both dynamic daily current-year syncs and massive historical backfills safely via **Idempotent Partitioning**. 
 
-### Key Optimizations:
-* **Streaming Extraction**: Processes files one at a time using local `/tmp` storage, immediately deleting processed files to stay below resource limits with zero Out-of-Memory (OOM) risks.
-* **Explicit Schema Mapping**: Extracts definitions from `capublic.sql` to map robust types (e.g., `VARCHAR` -> `STRING`, `LONGBLOB` -> `BYTES`) rather than depending on BigQuery auto-detection.
-* **Zero-FUSE Penalty**: Processes on ephemeral storage to avoid GCS FUSE latency overheads.
+During operation, every parsed record is automatically tagged with a dynamic `session_year` column based on the source archive. Instead of performing full, destructive table truncations, the pipeline relies on a precise pre-load SQL deletion to wipe the target session year, followed seamlessly by a `WRITE_APPEND` load operation. This modern architecture allows the pipeline to safely replace existing partitions without touching historical records.
 
 ---
 
-## Prerequisites
+## Prerequisites & Deployment
 
 Before deploying the pipeline, ensure you have:
 1.  **GCP Project**: An active Google Cloud Project with billing enabled.
@@ -26,70 +23,47 @@ gcloud auth login
 gcloud auth application-default login
 ```
 
----
-
-## Deployment Steps
-
-### 1. Configure Variables
-Create a `terraform.tfvars` file from the example format:
-```bash
-cp terraform.tfvars.example terraform.tfvars
-```
-Edit the `terraform.tfvars` to fill in your `project_id` and preferred `region`.
-
-### 2. Deploy Infrastructure
-Initialize and apply the Terraform configuration. This will enable APIs, create the staging bucket, dataset, and Artifact Registry repository before building the Docker image and deploying the Cloud Run job:
-
+Once authenticated, deploy the entire pipeline infrastructure safely using Terraform:
 ```bash
 terraform init
-terraform apply
+terraform apply -auto-approve
 ```
-*Note: The Docker image build is triggered automatically if the code hashes change, ensuring the Cloud Run job always deploys with the latest code.*
 
 ---
 
-## Pipeline Operations
+## ⚠️ CRITICAL DEPLOYMENT NOTE
 
-### Execute the Pipeline
-Trigger the job manually from the GCP Console or via the CLI:
+> [!WARNING]
+> **Schema Incompatibility Alert:** If you have run previous versions of this pipeline template, you **MUST** manually delete your existing `cal_legislature_data` dataset from BigQuery before executing the backfill or daily syncs.
+> 
+> The newly introduced Idempotent Partitioning architecture enforces a required `session_year` column that will cause down-stream `400 Errors (Schema Mismatch)` if the pipeline attempts to append or pre-delete from the older table schemas.
+
+---
+
+## Operation 1: The Daily Sync (Current Year)
+
+To execute a standard daily sync pulling the latest current-year legislative activity, simply trigger the Cloud Run job directly:
 
 ```bash
 gcloud run jobs execute policy-agent-ingest --region us-central1
 ```
 
-### Advanced Usage
-
-#### Debugging with Limits
-To test with small chunks (highly recommended for validation cycles), pass a limit parameter strictly enforcing row-limits:
-
-```bash
-gcloud run jobs execute policy-agent-ingest \
-    --region us-central1 \
-    --args="--limit=200"
-```
-
-#### Custom Zip Source
-By default, the script calculates and downloads the correct static yearly dump (e.g., `pubinfo_2026.zip`). You can override this to run historical data or point to a manual extraction link:
-
-```bash
-gcloud run jobs execute policy-agent-ingest \
-    --region us-central1 \
-    --args="--zip-url=http://custom-url/pubinfo_2025.zip"
-```
-
-Or use a GCS staging address:
-```bash
-gcloud run jobs execute policy-agent-ingest \
-    --region us-central1 \
-    --args="--zip-file=gs://your-bucket-name/backup.zip"
-```
+This command defaults to fetching the current year's dataset. It will precisely prune today's existing year records in BigQuery and insert the updated dataset without disrupting the historical archive.
 
 ---
 
-## Clean Up
-To avoid incurring future charges for resources you no longer need, tear down the infrastructure using Terraform:
+## Operation 2: The Historical Backfill (1989-2024)
+
+To perform a massive historical data synchronization covering 36 years of California policy activity, execute the included bash orchestration script:
 
 ```bash
-terraform destroy
+./backfill.sh
 ```
-*(Note: You may need to manually empty the GCS staging bucket or Artifact Registry repository if Terraform halts on deleting non-empty resources).*
+
+This script leverages Cloud Run's concurrency, dispatching 36 standalone container invocations utilizing the `--async` pattern to process decades of text and file artifacts in parallel. Because of the pipeline's idempotent design, you can also manually re-run specific historical years to fix state without data duplication by using argument overrides:
+
+```bash
+gcloud run jobs execute policy-agent-ingest \
+    --region us-central1 \
+    --args="--zip-url=http://downloads.leginfo.legislature.ca.gov/pubinfo_1994.zip"
+```
