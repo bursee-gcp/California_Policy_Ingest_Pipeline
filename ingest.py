@@ -68,6 +68,10 @@ def parse_schema(sql_file_path):
                         bigquery.SchemaField(col_name, bq_type)
                     )
             elif line.startswith(")") and current_table:
+                # Explicitly inject session_year to support dynamic backfill partition logic
+                schema_map[current_table].append(
+                    bigquery.SchemaField('session_year', 'INTEGER')
+                )
                 current_table = None
                 
     return schema_map
@@ -78,15 +82,22 @@ def upload_blob(bucket, source_file_name, destination_blob_name):
     blob.upload_from_filename(source_file_name)
     logger.info(f"Uploaded {source_file_name} to {destination_blob_name}.")
 
-def load_to_bigquery(client, dataset_id, table_name, uri, schema):
+def load_to_bigquery(client, dataset_id, table_name, uri, schema, target_year):
     """Loads a Parquet file from GCS into BigQuery with explicit schema."""
     table_id = f"{client.project}.{dataset_id}.{table_name}"
     
     job_config = bigquery.LoadJobConfig(
         schema=schema,
         source_format=bigquery.SourceFormat.PARQUET,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
     )
+
+    try:
+        delete_query = f"DELETE FROM `{table_id}` WHERE session_year = {target_year}"
+        client.query(delete_query).result()
+        logger.info(f"Idempotent pre-load deletion completed for session_year={target_year} in {table_name}.")
+    except Exception as e:
+        logger.warning(f"Pre-load deletion skipped (table may not exist yet): {e}")
 
     try:
         load_job = client.load_table_from_uri(
@@ -125,13 +136,14 @@ def cast_dataframe_to_schema(df, schema):
                 logger.warning(f"Failed to cast column {col} to {field.field_type}: {e}")
     return df
 
-def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id, zip_ref, limit=None):
+def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id, zip_ref, target_year, limit=None):
     """
     Parses a .dat file, converts to Parquet, uploads to GCS, and loads to BigQuery.
     Streams processing chunk by chunk to prevent OOM.
     """
     logger.info(f"Processing table: {table_name}")
-    columns = [field.name for field in schema]
+    # Exclude session_year from source columns as it is injected dynamically
+    columns = [field.name for field in schema if field.name != 'session_year']
     
     try:
         is_bill_version = ('bill_version_tbl' in table_name)
@@ -163,6 +175,9 @@ def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id
 
                     chunk['bill_xml'] = chunk['bill_xml'].apply(read_lob)
                 
+                # Inject Session Year
+                chunk['session_year'] = target_year
+                
                 # Enforce Strict Schema Casting Pre-Parquet
                 chunk = cast_dataframe_to_schema(chunk, schema)
 
@@ -185,7 +200,7 @@ def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id
         if gcs_uris:
             wildcard_uri = f"gs://{bucket.name}/staging/{table_name}/*.parquet"
             logger.info(f"Loading {wildcard_uri} into BigQuery...")
-            load_to_bigquery(bq_client, dataset_id, table_name, wildcard_uri, schema)
+            load_to_bigquery(bq_client, dataset_id, table_name, wildcard_uri, schema, target_year)
             
     except Exception as e:
         logger.error(f"Failed to process {dat_file}: {e}")
@@ -211,6 +226,11 @@ def main():
     if not args.bucket:
         logger.error("GCS_BUCKET environment variable or --bucket argument is required.")
         return
+
+    # Extract target year from zip url
+    year_match = re.search(r'pubinfo_(\d{4})', args.zip_url)
+    target_year = int(year_match.group(1)) if year_match else datetime.date.today().year
+    logger.info(f"Extracted target_year={target_year} for ingestion.")
 
     storage_client = storage.Client(project=args.project)
     bucket = storage_client.bucket(args.bucket)
@@ -321,6 +341,7 @@ def main():
                         bq_client, 
                         args.dataset, 
                         zip_ref, 
+                        target_year,
                         limit=args.limit
                     )
                     
