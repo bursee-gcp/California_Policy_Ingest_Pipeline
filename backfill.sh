@@ -11,8 +11,7 @@ for YEAR in {1989..2024}; do
     
     gcloud run jobs execute policy-agent-ingest \
         --region us-central1 \
-        --args="--zip-url=http://downloads.leginfo.legislature.ca.gov/pubinfo_${YEAR}.zip" \
-        --async
+        --args="--zip-url=http://downloads.leginfo.legislature.ca.gov/pubinfo_${YEAR}.zip"
 done
 
 echo "All historical containers successfully dispatched! Review execution progress in the Google Cloud console."
