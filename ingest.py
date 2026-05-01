@@ -69,9 +69,11 @@ def parse_schema(sql_file_path):
                     )
             elif line.startswith(")") and current_table:
                 # Explicitly inject session_year to support dynamic backfill partition logic
-                schema_map[current_table].append(
-                    bigquery.SchemaField('session_year', 'INTEGER')
-                )
+                existing_fields = [f.name.lower() for f in schema_map[current_table]]
+                if 'session_year' not in existing_fields:
+                    schema_map[current_table].append(
+                        bigquery.SchemaField('session_year', 'INTEGER', description='INJECTED')
+                    )
                 current_table = None
                 
     return schema_map
@@ -142,8 +144,8 @@ def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id
     Streams processing chunk by chunk to prevent OOM.
     """
     logger.info(f"Processing table: {table_name}")
-    # Exclude session_year from source columns as it is injected dynamically
-    columns = [field.name for field in schema if field.name != 'session_year']
+    # Exclude session_year from source columns ONLY if it was injected (not in original TSV)
+    columns = [field.name for field in schema if field.description != 'INJECTED']
     
     try:
         is_bill_version = ('bill_version_tbl' in table_name)
@@ -176,13 +178,14 @@ def process_dat_file(dat_file, table_name, schema, bucket, bq_client, dataset_id
                     chunk['bill_xml'] = chunk['bill_xml'].apply(read_lob)
                 
                 # Inject Session Year
-                chunk['session_year'] = target_year
+                if 'session_year' not in chunk.columns:
+                    chunk['session_year'] = target_year
                 
                 # Enforce Strict Schema Casting Pre-Parquet
                 chunk = cast_dataframe_to_schema(chunk, schema)
 
                 output_file = f"/tmp/{table_name}_part_{part_num}.parquet"
-                chunk.to_parquet(output_file, index=False)
+                chunk.to_parquet(output_file, index=False, engine='pyarrow', coerce_timestamps='us', allow_truncated_timestamps=True)
                 
                 blob_name = f"staging/{table_name}/{table_name}_part_{part_num}.parquet"
                 upload_blob(bucket, output_file, blob_name)
